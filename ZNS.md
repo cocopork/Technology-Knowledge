@@ -10,6 +10,8 @@
 
 ​	[配置openssh-server](#配置openssh-server)
 
+[操作FEMU](#操作FEMU)
+
 [在虚拟机中安装Ubuntu](#在虚拟机中安装Ubuntu)
 
 ​	[配置共享文件夹](#配置共享文件夹)
@@ -19,6 +21,8 @@
 [构建ZNS虚拟设备(TODO)](#构建ZNS虚拟设备)
 
 [支持ZNS的内核编译选项](#支持ZNS的内核编译选项)
+
+[操作ZNS](#操作ZNS)
 
 [其他问题](#其他问题)
 
@@ -101,7 +105,65 @@ apt-get build-dep qemu
 
 > FEMU编译好后的二进制文件为 x86_64-softmmu/qemu-system-x86_64
 
-### 操作femu
+## 操作FEMU
+
+​	FEMU启动脚本（带ZNS设备）如下:
+
+```shell
+#!/bin/bash
+#
+# Huaicheng Li <hcli@cmu.edu>
+# Run FEMU as Zoned-Namespace (ZNS) SSDs
+#
+
+# Image directory
+IMGDIR=/home/ggboy/sdb6-file/images
+# Virtual machine disk image
+OSIMGF=$IMGDIR/u20s.qcow2
+# Share image path
+SHAREDIR=/home/ggboy/ZNS/femu_share
+# QEMU path
+QEMUPATH=/home/ggboy/ZNS/FEMU/femu/build-femu/x86_64-softmmu/qemu-system-x86_64
+if mountpoint -q /home/ggboy/sdb6-file/;
+    then
+        echo "/home/ggboy/sdb6-file/ mounted"
+    else
+        echo "/home/ggboy/sdb6-file/ not mounted"
+        exit
+fi
+if [[ ! -e "$OSIMGF" ]]; then
+	echo ""
+	echo "VM disk image couldn't be found ..."
+	echo "Please prepare a usable VM image and place it as $OSIMGF"
+	echo "Once VM disk image is ready, please rerun this script again"
+	echo ""
+	exit
+fi
+
+sudo $QEMUPATH \
+    -name "FEMU-ZNSSD-VM" \
+    -enable-kvm \
+    -cpu host \
+    -smp 16 \
+    -m 16G \
+    -device virtio-scsi-pci,id=scsi0 \
+    #设置系统镜像
+    -device scsi-hd,drive=hd0 \
+    -drive file=$OSIMGF,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
+    #模拟普通SSD设备，femu_mode=1为SSD
+    -device femu,devsz_mb=8192,femu_mode=1 \
+    #模拟ZNS设备，femu_mode=3为ZNS
+    -device femu,devsz_mb=20480,femu_mode=3,zone_sz_mb=512 \
+    -fsdev local,security_model=passthrough,id=fsdev0,path=/home/ggboy/ZNS/femu_share \
+    #共享文件夹
+    -device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=hostshare \
+    #配置网络接口
+    -net user,hostfwd=tcp::8080-:22 \
+    -net nic,model=virtio \
+    #不要图像界面
+    -nographic \
+    -qmp unix:./qmp-sock,server,nowait 2>&1 | tee log
+```
 
 ​	FEMU的镜像u20已经配置好了，直接在宿主机连接即可
 
@@ -290,6 +352,59 @@ Enable the block layer
 ```
 
 ​	在宿主机编译内核`make -j24`，在虚拟机安装内核`make modules_install install`。
+
+
+
+## 操作ZNS
+
+```shell
+# 查看设备Zone的大小（单位：扇区个数，扇区大小512B）
+cat /sys/block/nvme1n1/queue/chunk_sectors 
+# 查看zone的容量
+blkzone capacity /dev/nvme1n1
+# 报告ZNS所有信息
+blkzone report /dev/nvme1n1 | less
+```
+
+### 挂载ZoneFS
+
+​	硕哥应该在弄，即ZenFS
+
+### 挂载F2FS
+
+​	文档中有一些需要注意的事情：
+
+​	文档链接：[File Systems | Zoned Storage](https://zonedstorage.io/docs/linux/fs)
+
+1. f2fs控制的卷的总容量大小不能超过16TB。
+
+2. 因为ZNS不能随机写，f2fs不能只挂载在一个ZNS SSD上，需要挂载两个盘。因此需要先格式化两块盘再挂载ff2fs。
+
+   首先，需要先修改一下设备Block-IO 调度器的默认选项，保证文件数据能按顺序写入两块盘，如下
+
+   ```shell
+   # nvme1n1表示ZNS盘，scheduler是一个配置文件，可以用cat查看，不过默认都是mq-deadline
+   echo mq-deadline > /sys/block/nvme1n1/queue/scheduler
+   ```
+
+   其次，格式化两个设备
+
+   ```shell
+   # -c 表示格式化多设备，nvme0n1是可随机写的常规设备
+   sudo mkfs.f2fs -f -m -c /dev/nvme1n1 /dev/nvme0n1
+   ```
+
+   最后，挂载时只需要指明常规设备即可。
+
+   ```shell
+   sudo mount -t f2fs /dev/nvme0n1 /mnt/f2fs/
+   ```
+
+   
+
+3. 
+
+
 
 
 
